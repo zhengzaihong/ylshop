@@ -1,0 +1,208 @@
+import { createProviderAdapter } from "./providers";
+import type { PaymentAdapter } from "./types";
+import { validateJsonFormValues, type JsonFormFieldDefinition, type JsonFormValues } from "@/lib/json-form-values";
+import type { CurrencyCode } from "@/lib/money";
+import {
+  parseAlipayConfig,
+  parseBepusdtConfig,
+  parseEpayConfig,
+  parseHashpayConfig,
+  parsePerpayConfig,
+  parseStripeConfig,
+  type PaymentProviderConfig,
+} from "@/lib/config-schemas";
+
+export type PaymentProviderKind = "ALIPAY" | "EPAY" | "BEPUSDT" | "STRIPE" | "HASHPAY" | "PERPAY";
+export type PaymentChannel = "web" | "wap" | "face_to_face" | "alipay" | "wxpay";
+
+
+export type ProviderDefinition = {
+  provider: PaymentProviderKind;
+  title: string;
+  schemaVersion: 1;
+  fields: JsonFormFieldDefinition[];
+  defaults: JsonFormValues;
+  parseConfig: (json: string) => PaymentProviderConfig;
+  getChannels: (config: PaymentProviderConfig) => PaymentChannel[];
+  createAdapter: (config: Record<string, unknown>) => PaymentAdapter;
+
+  /** `config` means the provider settles in the currency configured in its own settings. */
+  supportedCurrencies: readonly CurrencyCode[] | "config";
+
+  callbackResponse: "text" | "json";
+};
+
+const common = {
+  notifyUrl: { key: "notifyUrl", label: "回调地址", type: "url" as const, required: true },
+  returnUrl: { key: "returnUrl", label: "返回地址", type: "url" as const, required: true },
+};
+
+export const paymentProviderDefinitions: Record<PaymentProviderKind, ProviderDefinition> = {
+  ALIPAY: {
+    provider: "ALIPAY",
+    title: "支付宝",
+    schemaVersion: 1,
+    fields: [
+      { key: "modes", label: "支付模式", type: "multi_select", required: true, min: 1, options: [{ label: "网页/H5", value: "web" }, { label: "当面付", value: "face_to_face" }] },
+      { key: "baseUrl", label: "网关地址", type: "url", required: true },
+      { key: "appId", label: "应用 ID", type: "text", required: true },
+      { key: "sellerId", label: "商户 PID / seller_id", type: "text", required: true },
+      { key: "privateKey", label: "应用私钥", type: "textarea", required: true, secret: true },
+      { key: "alipayPublicKey", label: "支付宝公钥", type: "textarea", required: true, secret: true },
+      common.notifyUrl,
+      common.returnUrl,
+    ],
+    defaults: { schemaVersion: 1, modes: ["web"], baseUrl: "https://openapi.alipay.com", appId: "", sellerId: "", notifyUrl: "", returnUrl: "" },
+    parseConfig: parseAlipayConfig,
+    getChannels: (config) => {
+      if (config.schemaVersion !== 1 || !("modes" in config)) return [];
+      return config.modes.map((mode) => mode === "web" ? "web" : "face_to_face");
+    },
+    createAdapter: (config) => createProviderAdapter("ALIPAY", config),
+    supportedCurrencies: ["CNY"],
+
+    callbackResponse: "text",
+  },
+  EPAY: {
+    provider: "EPAY",
+    title: "易支付",
+    schemaVersion: 1,
+    fields: [
+      { key: "baseUrl", label: "网关地址", type: "url", required: true, description: "V1（MD5）请求 {网关}/submit.php；V2（RSA）请求 {网关}/api/pay/create。" },
+      { key: "pid", label: "商户 PID", type: "text", required: true },
+      { key: "signType", label: "接口版本", type: "select", required: true, options: [{ label: "V1（MD5，旧接口）", value: "MD5" }, { label: "V2（RSA-SHA256，推荐）", value: "RSA" }] },
+      { key: "key", label: "商户密钥（MD5）", type: "password", required: true, secret: true, visibleWhen: { key: "signType", in: ["MD5"] } },
+      { key: "merchantPrivateKey", label: "商户私钥（RSA）", type: "textarea", required: true, secret: true, visibleWhen: { key: "signType", in: ["RSA"] }, description: "商户后台 API 信息页生成的商户私钥，支持裸 Base64 或 PKCS#8 PEM（不支持 PKCS#1）。" },
+      { key: "platformPublicKey", label: "平台公钥（RSA）", type: "textarea", required: true, visibleWhen: { key: "signType", in: ["RSA"] }, description: "用于校验平台响应和异步通知签名；若创建支付报签名失败，请确认商户后台已开通 RSA 并复制最新公钥。" },
+      { key: "epayChannels", label: "支付子渠道", type: "multi_select", required: true, min: 1, options: [{ label: "支付宝", value: "alipay" }, { label: "微信", value: "wxpay" }] },
+      common.notifyUrl,
+      common.returnUrl,
+    ],
+    defaults: { schemaVersion: 1, baseUrl: "", pid: "", signType: "MD5", epayChannels: ["alipay", "wxpay"], notifyUrl: "", returnUrl: "" },
+    parseConfig: parseEpayConfig,
+    getChannels: (config) => "epayChannels" in config ? config.epayChannels : [],
+    createAdapter: (config) => createProviderAdapter("EPAY", config),
+    supportedCurrencies: ["CNY"],
+    callbackResponse: "text",
+  },
+  BEPUSDT: {
+    provider: "BEPUSDT",
+    title: "BEpusdt",
+    schemaVersion: 1,
+    fields: [{ key: "baseUrl", label: "网关地址", type: "url", required: true }, { key: "appSecret", label: "应用密钥", type: "password", required: true, secret: true }, common.notifyUrl, common.returnUrl],
+    defaults: { schemaVersion: 1, baseUrl: "", appSecret: "", notifyUrl: "", returnUrl: "" },
+    parseConfig: parseBepusdtConfig,
+    getChannels: () => [],
+    createAdapter: (config) => createProviderAdapter("BEPUSDT", config),
+    supportedCurrencies: ["CNY"],
+    callbackResponse: "text",
+  },
+  STRIPE: {
+    provider: "STRIPE",
+    title: "Stripe",
+    schemaVersion: 1,
+    fields: [{ key: "secretKey", label: "Secret Key", type: "password", required: true, secret: true }, { key: "webhookSecret", label: "Webhook Secret", type: "password", required: true, secret: true }, { key: "currency", label: "币种", type: "select", required: true, options: [{ label: "CNY", value: "cny" }, { label: "USD", value: "usd" }, { label: "TWD", value: "twd" }, { label: "JPY", value: "jpy" }, { label: "EUR", value: "eur" }, { label: "GBP", value: "gbp" }] }, common.notifyUrl, common.returnUrl],
+    defaults: { schemaVersion: 1, secretKey: "", webhookSecret: "", currency: "cny", notifyUrl: "", returnUrl: "" },
+    parseConfig: parseStripeConfig,
+    getChannels: () => [],
+    createAdapter: (config) => createProviderAdapter("STRIPE", config),
+    supportedCurrencies: "config",
+    callbackResponse: "text",
+  },
+  HASHPAY: {
+    provider: "HASHPAY",
+    title: "HashPay",
+    schemaVersion: 1,
+    fields: [{ key: "baseUrl", label: "网关地址", type: "url", required: true }, { key: "merchantId", label: "商户 ID", type: "text", required: true }, { key: "privateKey", label: "PKCS#8 私钥", type: "textarea", required: true, secret: true }, { key: "currency", label: "币种", type: "text", required: true }, common.notifyUrl, common.returnUrl],
+    defaults: { schemaVersion: 1, baseUrl: "", merchantId: "", privateKey: "", currency: "CNY", notifyUrl: "", returnUrl: "" },
+    parseConfig: parseHashpayConfig,
+    getChannels: () => [],
+    createAdapter: (config) => createProviderAdapter("HASHPAY", config),
+    supportedCurrencies: "config",
+    callbackResponse: "text",
+  },
+  PERPAY: {
+    provider: "PERPAY", title: "PerPay", schemaVersion: 1,
+    fields: [{ key: "baseUrl", label: "PerPay 地址", type: "url", required: true }, { key: "apiSecret", label: "API Secret", type: "password", required: true, secret: true }, { key: "webhookSecret", label: "Webhook Secret", type: "password", required: true, secret: true }, common.notifyUrl, common.returnUrl],
+    defaults: { schemaVersion: 1, baseUrl: "", apiSecret: "", webhookSecret: "", notifyUrl: "", returnUrl: "" },
+    parseConfig: parsePerpayConfig, getChannels: () => [], createAdapter: (config) => createProviderAdapter("PERPAY", config), callbackResponse: "json",
+    supportedCurrencies: ["CNY"],
+  },
+};
+
+const paymentNotifyPaths: Partial<Record<PaymentProviderKind, string>> = {
+  ALIPAY: "/api/payments/alipay/notify",
+  EPAY: "/api/payments/epay/notify",
+  BEPUSDT: "/api/payments/bepusdt/notify",
+  STRIPE: "/api/payments/stripe/notify",
+  HASHPAY: "/api/payments/hashpay/notify",
+  PERPAY: "/api/payments/perpay/notify",
+};
+
+export function getProviderDefinition(provider: string) {
+  return paymentProviderDefinitions[provider as PaymentProviderKind];
+}
+
+export function getPaymentUrlPaths(provider: PaymentProviderKind) {
+  return {
+    notifyUrl: paymentNotifyPaths[provider] ?? "",
+    returnUrl: "/payment-result",
+  };
+}
+
+export function getPaymentUrlDefaults(provider: PaymentProviderKind, siteUrl: string | null | undefined) {
+  if (!siteUrl) return { notifyUrl: "", returnUrl: "" };
+  const origin = new URL(siteUrl).origin;
+  const paths = getPaymentUrlPaths(provider);
+  return {
+    notifyUrl: `${origin}${paths.notifyUrl}`,
+    returnUrl: `${origin}${paths.returnUrl}`,
+  };
+}
+
+export function resolvePaymentUrls(provider: PaymentProviderKind, siteUrl: string | null | undefined, values: Record<string, unknown>) {
+  if (!siteUrl) return { notifyUrl: "", returnUrl: "" };
+  const origin = new URL(siteUrl).origin;
+  const paths = getPaymentUrlPaths(provider);
+  const rawReturnUrl = typeof values.returnUrl === "string" && values.returnUrl.trim() ? values.returnUrl.trim() : paths.returnUrl;
+  let returnPath: string;
+  try {
+    const url = new URL(rawReturnUrl, `${origin}/`);
+    returnPath = `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    returnPath = paths.returnUrl;
+  }
+  return {
+    notifyUrl: `${origin}${paths.notifyUrl}`,
+    returnUrl: new URL(returnPath, `${origin}/`).toString(),
+  };
+}
+
+export function getPaymentNotifyPath(provider: PaymentProviderKind) {
+  return paymentNotifyPaths[provider] ?? "";
+}
+
+export function parseProviderConfig(provider: string, configJson: string) {
+  const definition = getProviderDefinition(provider);
+  if (!definition) throw new Error("PAYMENT_PROVIDER_NOT_IMPLEMENTED");
+  let value: unknown;
+  try { value = JSON.parse(configJson); } catch { throw new Error("PAYMENT_CONFIG_INVALID"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("PAYMENT_CONFIG_INVALID");
+  const allowed = new Set(["schemaVersion", ...definition.fields.map((field) => field.key)]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("PAYMENT_CONFIG_INVALID");
+  // Validate against the same defaults the admin form pre-fills so fields added
+  // after a configuration was stored do not invalidate it.
+  validateJsonFormValues(definition.fields, { ...definition.defaults, ...(value as Record<string, unknown>) });
+  return definition.parseConfig(configJson);
+}
+
+export function validateProviderRegistry() {
+  const providers = Object.keys(paymentProviderDefinitions);
+  if (new Set(providers).size !== providers.length) throw new Error("PAYMENT_PROVIDER_REGISTRY_DUPLICATE");
+  for (const [provider, definition] of Object.entries(paymentProviderDefinitions)) {
+    if (definition.provider !== provider || definition.schemaVersion !== 1 || definition.fields.some((field) => !field.key.trim())) throw new Error("PAYMENT_PROVIDER_REGISTRY_INVALID");
+  }
+  return true;
+}
+
+validateProviderRegistry();
